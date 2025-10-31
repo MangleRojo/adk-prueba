@@ -1,0 +1,15 @@
+# Google ADK - Agent Development Kit
+google-adk>=0.1.0
+
+# FastAPI - Framework web
+fastapi>=0.104.0
+
+# Uvicorn - Servidor ASGI
+uvicorn>=0.24.0
+
+# Pydantic - Validación de datos
+pydantic>=2.0.0
+
+# Para desarrollo (opcional pero recomendado)
+python-multipart>=0.0.6
+httpx>=0.25.0
