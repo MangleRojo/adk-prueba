@@ -6,7 +6,9 @@ Estructura Ecológica Principal de Bogotá
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from litellm import completion
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -75,6 +77,183 @@ class SessionHistoryResponse(BaseModel):
     created_at: str
     message_count: int
 
+
+def _as_serializable_dict(obj: Any) -> Any:
+    """Convierte objetos con métodos de serialización en dicts simples."""
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        try:
+            return obj.model_dump()
+        except Exception:
+            pass
+    if hasattr(obj, "dict"):
+        try:
+            return obj.dict()
+        except Exception:
+            pass
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+    return obj
+
+
+def _flatten_content(content: Any) -> str:
+    """Normaliza contenido potencialmente estructurado a texto plano."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                parts.append(str(text))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(content)
+
+
+def _resolve_litellm_params() -> Dict[str, Any]:
+    """Obtiene la configuración del modelo LiteLLM a partir del agente o del entorno."""
+    params: Dict[str, Any] = {}
+
+    agent_model = getattr(root_agent, "model", None)
+    if agent_model is not None:
+        for attr in ("model", "api_key", "api_base", "temperature", "max_tokens" ):
+            value = getattr(agent_model, attr, None)
+            if value is not None:
+                key = "model" if attr == "model" else attr
+                params[key] = value
+
+    if "model" not in params:
+        params["model"] = getattr(config, "AGENT_MODEL", "gpt-3.5-turbo")
+
+    if "api_key" not in params:
+        params["api_key"] = (
+            os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("LITELLM_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+        )
+
+    if "api_base" not in params:
+        api_base_env = (
+            os.getenv("LITELLM_API_BASE")
+            or os.getenv("OPENROUTER_API_BASE")
+            or os.getenv("LITELLM_API_URL")
+        )
+        if api_base_env:
+            params["api_base"] = api_base_env
+
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _build_conversation(session_id: str) -> List[Dict[str, str]]:
+    """Construye el historial de mensajes en formato compatible con LiteLLM."""
+    conversation: List[Dict[str, str]] = []
+
+    system_instruction = (
+        getattr(root_agent, "instruction", None)
+        or getattr(config, "AGENT_INSTRUCTION", None)
+    )
+    if system_instruction:
+        conversation.append({"role": "system", "content": system_instruction})
+
+    session_data = sessions_store.get(session_id)
+    if session_data and session_data.get("messages"):
+        for msg in session_data["messages"]:
+            if msg.get("role") in ("user", "assistant"):
+                conversation.append({
+                    "role": msg["role"],
+                    "content": msg["content"],
+                })
+
+    return conversation
+
+
+def _extract_text_from_response(model_response: Any) -> str:
+    """Extrae el texto de la primera respuesta del modelo LiteLLM."""
+    if model_response is None:
+        return ""
+
+    if isinstance(model_response, str):
+        return model_response.strip()
+
+    response_obj = _as_serializable_dict(model_response)
+    choices = []
+
+    if isinstance(response_obj, dict):
+        choices = response_obj.get("choices") or []
+    else:
+        choices = getattr(model_response, "choices", []) or []
+
+    if not choices and hasattr(model_response, "model_dump"):
+        dumped = model_response.model_dump()
+        choices = dumped.get("choices", []) if isinstance(dumped, dict) else []
+
+    if not choices:
+        return str(model_response).strip()
+
+    first_choice = choices[0]
+    first_choice = _as_serializable_dict(first_choice)
+
+    if isinstance(first_choice, dict):
+        message = first_choice.get("message")
+        message = _as_serializable_dict(message)
+        if isinstance(message, dict):
+            content = message.get("content")
+            if content:
+                return _flatten_content(content).strip()
+
+        fallback_text = first_choice.get("text") or first_choice.get("content")
+        if fallback_text:
+            return _flatten_content(fallback_text).strip()
+
+    return str(model_response).strip()
+
+
+async def _generate_agent_reply(session_id: str) -> str:
+    """Invoca LiteLLM de forma no bloqueante y retorna el texto de respuesta."""
+    params = _resolve_litellm_params()
+
+    if not params.get("model"):
+        raise RuntimeError("Modelo de LiteLLM no configurado.")
+
+    if not params.get("api_key"):
+        raise RuntimeError(
+            "No se encontró una API key válida para LiteLLM. Define OPENROUTER_API_KEY o LITELLM_API_KEY."
+        )
+
+    messages = _build_conversation(session_id)
+
+    raw_response = await run_in_threadpool(
+        completion,
+        messages=messages,
+        **params,
+    )
+
+    response_text = _extract_text_from_response(raw_response)
+    return response_text.strip()
+
+
+def _fallback_agent_reply(user_message: str) -> str:
+    """Intento secundario usando las capacidades nativas del agente ADK."""
+    system_instruction = getattr(root_agent, "instruction", None)
+    try:
+        if hasattr(root_agent, "generate"):
+            raw = root_agent.generate(
+                user_message,
+                system_instruction=system_instruction,
+            )
+            return _extract_text_from_response(raw)
+        if hasattr(root_agent, "__call__"):
+            raw = root_agent(user_message)
+            return _extract_text_from_response(raw)
+    except Exception:
+        pass
+    return f"Echo: {user_message}"
+
 # PASO 6: Definir los endpoints del API
 
 @app.get("/")
@@ -139,8 +318,8 @@ async def agent_info():
         "name": root_agent.name,
         "description": root_agent.description,
         "instruction": root_agent.instruction,
-        "model": root_agent.model,
-        "sub_agents": sub_agents_info
+        "model": str(getattr(root_agent, "model", "N/D")),
+        "sub_agents": sub_agents_info,
     }
 
 @app.post("/chat", response_model=ChatResponse)
@@ -182,73 +361,50 @@ async def chat_with_agent(request: ChatRequest):
     })
     
     try:
-        # Construir el contexto con el historial de la sesión
-        messages = []
-        
-        # Agregar la instrucción del agente como mensaje del sistema
-        if hasattr(root_agent, 'instruction') and root_agent.instruction:
-            messages.append({
-                "role": "system",
-                "content": root_agent.instruction
-            })
-        
-        # Agregar historial de la sesión si existe
-        if session_id in sessions_store and sessions_store[session_id]["messages"]:
-            for msg in sessions_store[session_id]["messages"]:
-                # Solo agregar mensajes de usuario y asistente, no errores
-                if msg["role"] in ["user", "assistant"]:
-                    messages.append({
-                        "role": msg["role"],
-                        "content": msg["content"]
-                    })
-        
-        # Usar el método de generate del agente si está disponible
-        # De lo contrario, devolver un mensaje de ejemplo
-        try:
-            if hasattr(root_agent, 'generate'):
-                response_text = root_agent.generate(
-                    request.message,
-                    system_instruction=root_agent.instruction if hasattr(root_agent, 'instruction') else None
-                )
-            elif hasattr(root_agent, '__call__'):
-                response_text = root_agent(request.message)
-            else:
-                # Respuesta de fallback si el agente no tiene métodos esperados
-                response_text = f"Echo: {request.message}"
-        except Exception as agent_error:
-            # Si falla la generación, devolver error descriptivo
-            raise agent_error
-        
+        response_text = await _generate_agent_reply(session_id)
+        if not response_text:
+            raise ValueError("La respuesta del agente llegó vacía.")
+    except Exception as agent_error:
+        response_text = _fallback_agent_reply(request.message)
+        error_details = str(agent_error).strip()
+        if error_details and len(error_details) > 200:
+            error_details = f"{error_details[:200]}..."
+        fallback_note = "[fallback] LiteLLM no respondió, se usó una respuesta alternativa."
+        if error_details:
+            fallback_note = f"{fallback_note} Detalle: {error_details}"
+        sessions_store[session_id]["messages"].append({
+            "role": "system",
+            "content": fallback_note,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    assistant_timestamp = datetime.now().isoformat()
+
+    try:
         # Guardar respuesta del agente en la sesión
         sessions_store[session_id]["messages"].append({
             "role": "assistant",
             "content": response_text,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": assistant_timestamp
         })
         sessions_store[session_id]["last_activity"] = datetime.now().isoformat()
-        
-        return ChatResponse(
-            response=response_text,
-            agent_name=root_agent.name,
-            session_id=session_id,
-            timestamp=timestamp
-        )
     except Exception as e:
-        error_message = f"Error al procesar el mensaje: {str(e)}"
-        
-        # Guardar error en la sesión
+        error_message = f"Error al almacenar la respuesta del agente: {str(e)}"
         sessions_store[session_id]["messages"].append({
             "role": "error",
             "content": error_message,
             "timestamp": datetime.now().isoformat()
         })
-        
-        return ChatResponse(
-            response=error_message,
-            agent_name=root_agent.name,
-            session_id=session_id,
-            timestamp=timestamp
-        )
+        raise HTTPException(status_code=500, detail=error_message)
+
+    response_text = response_text[:config.MAX_RESPONSE_LENGTH]
+
+    return ChatResponse(
+        response=response_text,
+        agent_name=root_agent.name,
+        session_id=session_id,
+        timestamp=assistant_timestamp
+    )
 
 @app.get("/sessions", response_model=List[SessionInfo])
 async def list_sessions():

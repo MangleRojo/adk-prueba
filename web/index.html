@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{DATAR} · Panel de Interacción</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>{DATAR} · Panel de Interacción</h1>
+      <p class="subtitle">Interactúa con el Sistema Agéntico Ambiental.</p>
+    </div>
+    <div class="connection-controls">
+      <label for="base-url">URL del API</label>
+      <div class="url-input-group">
+        <input id="base-url" type="url" placeholder="http://localhost:8000" autocomplete="off">
+        <button id="ping-btn" type="button">Probar conexión</button>
+      </div>
+      <span id="status-indicator" class="status status-idle">Sin comprobar</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel" id="agent-panel">
+      <div class="panel-header">
+        <h2>Información del agente</h2>
+        <button id="refresh-agent" type="button" class="ghost">Actualizar</button>
+      </div>
+      <div id="agent-info" class="info-card">
+        <p class="placeholder">Cargando información del agente…</p>
+      </div>
+    </section>
+
+    <section class="panel" id="chat-panel">
+      <div class="panel-header">
+        <h2>Chat</h2>
+        <div class="session-actions">
+          <button id="refresh-sessions" type="button" class="ghost">Actualizar sesiones</button>
+          <button id="new-session" type="button" class="secondary">Nueva sesión</button>
+        </div>
+      </div>
+
+      <div class="session-controls">
+        <label for="session-select">Sesiones activas</label>
+        <select id="session-select"></select>
+      </div>
+
+      <div id="chat-history" class="chat-history" aria-live="polite"></div>
+
+      <form id="chat-form" autocomplete="off">
+        <label for="message-input" class="sr-only">Mensaje para el agente</label>
+        <textarea id="message-input" rows="3" placeholder="Escribe tu mensaje…" required></textarea>
+        <div class="form-actions">
+          <span id="session-badge" class="badge">Sin sesión</span>
+          <button type="submit">Enviar</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <section class="panel" id="logs-panel">
+    <div class="panel-header">
+      <h2>Actividad</h2>
+      <button id="clear-logs" type="button" class="ghost">Limpiar</button>
+    </div>
+    <div id="logs" class="logs" aria-live="polite"></div>
+  </section>
+
+  <template id="message-template">
+    <article class="message">
+      <header class="meta">
+        <span class="role"></span>
+        <time class="timestamp" datetime=""></time>
+      </header>
+      <p class="content"></p>
+    </article>
+  </template>
+
+  <script src="./app.js" type="module"></script>
+</body>
+</html>
+

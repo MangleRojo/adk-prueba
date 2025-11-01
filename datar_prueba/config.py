@@ -3,7 +3,19 @@ Archivo de configuración para Datar API
 """
 
 import os
+from pathlib import Path
 from typing import Optional
+
+from dotenv import load_dotenv
+
+
+# Cargar variables de entorno desde .env
+PACKAGE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = PACKAGE_ROOT.parent
+
+# Prioridad: variables del entorno del sistema > .env del proyecto > .env del paquete
+load_dotenv(PROJECT_ROOT / ".env", override=False)
+load_dotenv(PACKAGE_ROOT / ".env", override=False)
 
 # ============= CONFIGURACIÓN GENERAL =============
 
