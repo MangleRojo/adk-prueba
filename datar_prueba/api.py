@@ -18,6 +18,15 @@ import uuid
 from .agent import root_agent
 from . import config
 
+# Validar que root_agent está correctamente inicializado
+if not root_agent:
+    raise RuntimeError("❌ root_agent no pudo ser inicializado. Verifica datar_prueba/agent.py")
+
+if root_agent.name != 'root_agent':
+    print(f"⚠️  ADVERTENCIA: El nombre del agente es '{root_agent.name}', esperado 'root_agent'")
+else:
+    print(f"✅ root_agent inicializado correctamente: {root_agent.name}")
+
 # PASO 2: Sistema de gestión de sesiones en memoria
 # En producción, esto debería estar en una base de datos
 sessions_store: Dict[str, Dict[str, Any]] = {}
@@ -175,11 +184,13 @@ def _build_conversation(session_id: str) -> List[Dict[str, str]]:
 def _extract_text_from_response(model_response: Any) -> str:
     """Extrae el texto de la primera respuesta del modelo LiteLLM."""
     if model_response is None:
-        return ""
+        return "Sin respuesta del modelo"
 
     if isinstance(model_response, str):
-        return model_response.strip()
+        text = model_response.strip()
+        return text if text else "Sin respuesta del modelo"
 
+    # Intentar extraer como dict primero
     response_obj = _as_serializable_dict(model_response)
     choices = []
 
@@ -189,10 +200,18 @@ def _extract_text_from_response(model_response: Any) -> str:
         choices = getattr(model_response, "choices", []) or []
 
     if not choices and hasattr(model_response, "model_dump"):
-        dumped = model_response.model_dump()
-        choices = dumped.get("choices", []) if isinstance(dumped, dict) else []
+        try:
+            dumped = model_response.model_dump()
+            choices = dumped.get("choices", []) if isinstance(dumped, dict) else []
+        except Exception:
+            pass
 
     if not choices:
+        # Si no hay choices, intentar extraer el contenido directamente
+        if hasattr(model_response, "content"):
+            content = getattr(model_response, "content", "")
+            if content:
+                return _flatten_content(content).strip()
         return str(model_response).strip()
 
     first_choice = choices[0]
@@ -210,7 +229,14 @@ def _extract_text_from_response(model_response: Any) -> str:
         if fallback_text:
             return _flatten_content(fallback_text).strip()
 
-    return str(model_response).strip()
+    # Último intento: buscar en el objeto original
+    if hasattr(model_response, "content") and model_response.content:
+        return _flatten_content(model_response.content).strip()
+    
+    if hasattr(model_response, "text") and model_response.text:
+        return _flatten_content(model_response.text).strip()
+
+    return "Sin respuesta del modelo"
 
 
 async def _generate_agent_reply(session_id: str) -> str:
@@ -250,9 +276,11 @@ def _fallback_agent_reply(user_message: str) -> str:
         if hasattr(root_agent, "__call__"):
             raw = root_agent(user_message)
             return _extract_text_from_response(raw)
-    except Exception:
+    except Exception as e:
         pass
-    return f"Echo: {user_message}"
+    
+    # Si todo falla, retornar un mensaje informativo
+    return f"[Sistema] El agente procesó tu mensaje pero la respuesta está vacía. Modelo: {getattr(root_agent, 'model', 'desconocido')}. Por favor, intenta de nuevo."
 
 # PASO 6: Definir los endpoints del API
 
@@ -267,6 +295,7 @@ async def root():
         "endpoints": {
             "raiz": "/",
             "salud": "/health",
+            "root_agent_status": "/root_agent/status",
             "agentes": "/agents",
             "chat": "/chat",
             "info_agente": "/agent/info",
@@ -314,11 +343,40 @@ async def agent_info():
                 "description": getattr(agent, 'description', 'Sin descripción')
             })
     
+    # Obtener información del modelo
+    model_info = getattr(root_agent, "model", None)
+    model_str = str(model_info) if model_info else "N/D"
+    model_name = "N/D"
+    
+    # Si el modelo existe, intentar extraer el nombre
+    if model_info:
+        # Buscar en los atributos del objeto
+        possible_attrs = ['model', 'model_name', 'model_id', '_model', 'name']
+        for attr in possible_attrs:
+            if hasattr(model_info, attr):
+                value = getattr(model_info, attr, None)
+                if value and isinstance(value, str) and value != "N/D":
+                    model_name = value
+                    break
+        
+        # Si no encontró en atributos, intentar parsear del string
+        if model_name == "N/D" and "model=" in model_str:
+            try:
+                # Parsear: model='openrouter/minimax/minimax-m2:free' ...
+                start = model_str.find("model='") + len("model='")
+                end = model_str.find("'", start)
+                if start > len("model='") - 1 and end > start:
+                    model_name = model_str[start:end]
+            except Exception:
+                pass
+    
     return {
         "name": root_agent.name,
         "description": root_agent.description,
         "instruction": root_agent.instruction,
-        "model": str(getattr(root_agent, "model", "N/D")),
+        "model": model_str,
+        "model_name": model_name,
+        "has_model": model_info is not None,
         "sub_agents": sub_agents_info,
     }
 
@@ -453,6 +511,47 @@ async def say_hello():
         "hello": "world",
         "proyecto": "DATAR",
         "agente": root_agent.name
+    }
+
+@app.get("/root_agent/status")
+async def root_agent_status():
+    """Endpoint de diagnóstico - Verifica el estado de root_agent"""
+    model_info = getattr(root_agent, "model", None)
+    model_str = str(model_info) if model_info else "N/D"
+    model_name = "N/D"
+    
+    if model_info:
+        # Buscar en los atributos del objeto
+        possible_attrs = ['model', 'model_name', 'model_id', '_model', 'name']
+        for attr in possible_attrs:
+            if hasattr(model_info, attr):
+                value = getattr(model_info, attr, None)
+                if value and isinstance(value, str) and value != "N/D":
+                    model_name = value
+                    break
+        
+        # Si no encontró en atributos, intentar parsear del string
+        if model_name == "N/D" and "model=" in model_str:
+            try:
+                # Parsear: model='openrouter/minimax/minimax-m2:free' ...
+                start = model_str.find("model='") + len("model='")
+                end = model_str.find("'", start)
+                if start > len("model='") - 1 and end > start:
+                    model_name = model_str[start:end]
+            except Exception:
+                pass
+    
+    return {
+        "status": "active",
+        "agent_name": root_agent.name,
+        "description": root_agent.description,
+        "instruction": root_agent.instruction[:100] + "..." if root_agent.instruction and len(root_agent.instruction) > 100 else root_agent.instruction,
+        "has_model": model_info is not None,
+        "model": model_str,
+        "model_name": model_name,
+        "has_sub_agents": hasattr(root_agent, "sub_agents") and bool(root_agent.sub_agents),
+        "sub_agents_count": len(root_agent.sub_agents) if hasattr(root_agent, "sub_agents") and root_agent.sub_agents else 0,
+        "is_root_agent": root_agent.name == 'root_agent'
     }
 
 # PASO 7: Punto de entrada (para ejecución directa)
