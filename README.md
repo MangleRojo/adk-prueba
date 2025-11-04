@@ -189,3 +189,5 @@ Para reportar problemas o hacer sugerencias, crea un issue en el repositorio.
 
 Ver archivo LICENSE en el directorio raíz.
 
+
+

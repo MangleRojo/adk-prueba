@@ -17,3 +17,24 @@ pydantic>=2.0.0
 python-multipart>=0.0.6
 httpx>=0.25.0
 python-dotenv>=1.0.0
+
+# GuatilaM
+google-genai==1.47.0
+
+# Sebastian1022
+numpy>=1.25
+scipy>=1.11
+sounddevice>=0.4.8
+pydub>=0.25.1
+
+# M4r1l1
+python-dotenv
+Pillow
+matplotlib
+
+# Lina Puerto
+requests==2.32.4
+beautifulsoup4==4.13.4
+PyMuPDF  # proporciona el módulo `fitz`
+fastmcp
+mcp
